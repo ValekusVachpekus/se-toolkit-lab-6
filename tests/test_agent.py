@@ -61,3 +61,29 @@ def test_agent_read_file_tool():
     
     assert len(data["answer"]) > 0, "Answer should not be empty"
     assert isinstance(data["source"], str), "Source should reference a wiki file"
+
+
+def test_agent_framework_lookup():
+    """Test that agent uses read_file to find framework information."""
+    data = run_agent("What Python web framework does the backend use?")
+    
+    assert "tool_calls" in data
+    assert isinstance(data["tool_calls"], list)
+    
+    tool_names = [tc["tool"] for tc in data["tool_calls"]]
+    assert "read_file" in tool_names, "Expected read_file tool to be called for code lookup"
+    
+    assert len(data["answer"]) > 0, "Answer should not be empty"
+
+
+def test_agent_query_api_tool():
+    """Test that agent uses query_api tool for data queries."""
+    data = run_agent("How many items are in the database?")
+    
+    assert "tool_calls" in data
+    assert isinstance(data["tool_calls"], list)
+    
+    tool_names = [tc["tool"] for tc in data["tool_calls"]]
+    assert "query_api" in tool_names, "Expected query_api tool to be called for data queries"
+    
+    assert len(data["answer"]) > 0, "Answer should not be empty"

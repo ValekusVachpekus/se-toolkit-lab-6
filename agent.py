@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent CLI with agentic loop for documentation lookup."""
+"""Agent CLI with agentic loop for documentation and system queries."""
 
 import json
 import os
@@ -12,8 +12,9 @@ from dotenv import load_dotenv
 
 
 def load_config() -> dict[str, str]:
-    """Load LLM configuration from .env.agent.secret."""
+    """Load configuration from environment files."""
     load_dotenv(".env.agent.secret")
+    load_dotenv(".env.docker.secret")
     
     api_key = os.getenv("LLM_API_KEY")
     api_base = os.getenv("LLM_API_BASE")
@@ -26,10 +27,15 @@ def load_config() -> dict[str, str]:
         )
         sys.exit(1)
     
+    lms_api_key = os.getenv("LMS_API_KEY")
+    agent_api_base = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    
     return {
-        "api_key": api_key,
-        "api_base": api_base,
-        "model": model,
+        "llm_api_key": api_key,
+        "llm_api_base": api_base,
+        "llm_model": model,
+        "lms_api_key": lms_api_key,
+        "agent_api_base": agent_api_base,
     }
 
 
@@ -78,12 +84,68 @@ def read_file(path: str) -> str:
         return f"Error: {str(e)}"
 
 
-def execute_tool(tool_name: str, tool_args: dict[str, Any]) -> str:
+def query_api(method: str, path: str, body: str = "", config: dict[str, str] = None) -> str:
+    """Query the backend API."""
+    if not config:
+        return "Error: No API configuration available."
+    
+    lms_api_key = config.get("lms_api_key")
+    agent_api_base = config.get("agent_api_base", "http://localhost:42002")
+    
+    try:
+        url = f"{agent_api_base}{path}"
+        headers = {"Content-Type": "application/json"}
+        
+        if lms_api_key:
+            headers["Authorization"] = f"Bearer {lms_api_key}"
+        
+        request_body = None
+        if body:
+            try:
+                request_body = json.loads(body)
+            except json.JSONDecodeError:
+                return json.dumps({
+                    "status_code": 400,
+                    "body": "Error: Invalid JSON in request body",
+                })
+        
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(
+                method,
+                url,
+                json=request_body,
+                headers=headers,
+            )
+        
+        return json.dumps({
+            "status_code": response.status_code,
+            "body": response.text,
+        })
+    except httpx.TimeoutException:
+        return json.dumps({
+            "status_code": 0,
+            "body": "Error: Request timed out",
+        })
+    except Exception as e:
+        return json.dumps({
+            "status_code": 0,
+            "body": f"Error: {str(e)}",
+        })
+
+
+def execute_tool(tool_name: str, tool_args: dict[str, Any], config: dict[str, str] = None) -> str:
     """Execute a tool and return the result."""
     if tool_name == "list_files":
         return list_files(tool_args.get("path", ""))
     elif tool_name == "read_file":
         return read_file(tool_args.get("path", ""))
+    elif tool_name == "query_api":
+        return query_api(
+            tool_args.get("method", "GET"),
+            tool_args.get("path", ""),
+            tool_args.get("body", ""),
+            config,
+        )
     else:
         return f"Error: Unknown tool '{tool_name}'."
 
@@ -97,7 +159,7 @@ def get_tool_schemas() -> list[dict[str, Any]]:
                 "name": "list_files",
                 "description": (
                     "List files and directories in a directory. "
-                    "Use this to discover what files are available."
+                    "Use this to discover what documentation files are available."
                 ),
                 "parameters": {
                     "type": "object",
@@ -106,7 +168,7 @@ def get_tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": (
                                 "Directory path relative to project root "
-                                "(e.g., 'wiki', 'lab/tasks')"
+                                "(e.g., 'wiki', 'backend', 'lab/tasks')"
                             ),
                         }
                     },
@@ -120,7 +182,7 @@ def get_tool_schemas() -> list[dict[str, Any]]:
                 "name": "read_file",
                 "description": (
                     "Read the contents of a file. "
-                    "Use this to find specific information in documentation."
+                    "Use this to find specific information in documentation or source code."
                 ),
                 "parameters": {
                     "type": "object",
@@ -129,11 +191,44 @@ def get_tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": (
                                 "File path relative to project root "
-                                "(e.g., 'wiki/git-workflow.md', 'README.md')"
+                                "(e.g., 'wiki/architecture.md', 'backend/app/main.py', 'README.md')"
                             ),
                         }
                     },
                     "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": (
+                    "Query the backend API to get system information and data. "
+                    "Use this for questions about database state, item counts, analytics, "
+                    "framework information, or any dynamic system data."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                            "description": "HTTP method",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "API path starting with / (e.g., '/items/', "
+                                "'/analytics/completion-rate', '/status')"
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "JSON request body (optional, for POST/PUT requests)",
+                        },
+                    },
+                    "required": ["method", "path"],
                 },
             },
         },
@@ -146,18 +241,26 @@ def call_llm_with_tools(
 ) -> dict[str, Any]:
     """Call the LLM with tools enabled."""
     system_prompt = (
-        "You are a helpful documentation assistant. "
-        "Your task is to answer questions about the project by reading its documentation. "
-        "Always use the available tools to explore the wiki and find answers. "
-        "Start by listing the wiki directory to see what files are available, "
-        "then read relevant files to find the answer. "
-        "In your final response, always mention the file and section you found the answer in."
+        "You are a helpful assistant that answers questions about a software project. "
+        "You have three tools available:\n\n"
+        "1. list_files() - Explore the project structure and find documentation files\n"
+        "2. read_file() - Read documentation, source code, or configuration files\n"
+        "3. query_api() - Query the backend API for system state and data\n\n"
+        "Choose the right tool based on the question:\n"
+        "- For 'how do I' or 'what is' questions about the project, use list_files() then read_file()\n"
+        "- For questions about the Python framework, configuration, or code structure, use read_file()\n"
+        "- For questions about data (item counts, analytics), system facts (ports, status), "
+        "or dynamic information, use query_api()\n"
+        "- For bug diagnosis, read the error from query_api() and then use read_file() to "
+        "examine the relevant source code\n\n"
+        "Always start by understanding what kind of question it is, then use the appropriate tool. "
+        "After getting the answer, explain it clearly to the user."
     )
     
-    headers = {"Authorization": f"Bearer {config['api_key']}"}
+    headers = {"Authorization": f"Bearer {config['llm_api_key']}"}
     
     payload = {
-        "model": config["model"],
+        "model": config["llm_model"],
         "messages": [{"role": "system", "content": system_prompt}] + messages,
         "tools": get_tool_schemas(),
         "temperature": 0.7,
@@ -167,7 +270,7 @@ def call_llm_with_tools(
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
-                f"{config['api_base']}/chat/completions",
+                f"{config['llm_api_base']}/chat/completions",
                 json=payload,
                 headers=headers,
             )
@@ -189,7 +292,7 @@ def extract_source_from_content(content: str) -> str:
     match = re.search(r"(wiki/[\w\-./]+\.md(?:#[\w\-]+)?)", content)
     if match:
         return match.group(1)
-    return "Unknown source"
+    return ""
 
 
 def run_agent_loop(
@@ -220,7 +323,7 @@ def run_agent_loop(
         if has_tool_calls:
             assistant_message: dict[str, Any] = {
                 "role": "assistant",
-                "content": message.get("content", ""),
+                "content": message.get("content") or "",
             }
             if "tool_calls" in message:
                 assistant_message["tool_calls"] = message["tool_calls"]
@@ -229,7 +332,7 @@ def run_agent_loop(
             for tool_call in message["tool_calls"]:
                 tool_name = tool_call["function"]["name"]
                 tool_args = json.loads(tool_call["function"]["arguments"])
-                result = execute_tool(tool_name, tool_args)
+                result = execute_tool(tool_name, tool_args, config)
                 
                 tool_calls_made.append(
                     {
@@ -247,11 +350,11 @@ def run_agent_loop(
                     }
                 )
         else:
-            answer = message.get("content", "")
+            answer = message.get("content") or ""
             source = extract_source_from_content(answer)
             return answer, source, tool_calls_made
     
-    answer = message.get("content", "No answer generated")
+    answer = message.get("content") or "No answer generated"
     source = extract_source_from_content(answer)
     return answer, source, tool_calls_made
 

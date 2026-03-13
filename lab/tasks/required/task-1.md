@@ -57,7 +57,7 @@ Your agent needs an LLM that supports the OpenAI-compatible chat completions API
 >
 > - Free models have a **50 requests per day** limit per account.
 > - Free models can be **temporarily unavailable** due to upstream provider load (`429` errors).
-> - The autochecker runs 20 questions against your agent — free-tier rate limits may cause failures.
+> - The autochecker runs 10 questions against your agent — free-tier rate limits may cause failures.
 > - If you use OpenRouter, plan your testing carefully: use `run_eval.py --index N` to test one question at a time.
 
 </details>

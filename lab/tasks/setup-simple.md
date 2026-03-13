@@ -95,7 +95,9 @@ We refer to your fork as `fork` and to the original repo as `upstream`.
 
 ### 1.3. Start the services locally
 
-1. Start the services in the background:
+1. (`Windows`/`macOS`) Make sure [Docker Desktop](../../wiki/docker.md#start-docker) is running.
+
+2. Start the services in the background:
 
    ```terminal
    docker compose --env-file .env.docker.secret up --build -d
